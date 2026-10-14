@@ -1,0 +1,54 @@
+name: kim-voice
+services:
+  voice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kim-voice:0.1.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 3g
+    cpus: 4
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev,uid=1000
+    volumes:
+      - ${KIM_PRIVATE_DIR}/token:/run/kim-secrets/token:ro
+      - ${KIM_TLS_DIR}/upstream-server.crt:/run/kim-secrets/server.crt:ro
+      - ${KIM_TLS_DIR}/upstream-server.key:/run/kim-secrets/server.key:ro
+      - ${KIM_TLS_DIR}/ota-release:/run/kim-ota:ro
+      - ${KIM_SOURCE_DIR}/character/soul/CONSTITUTION.md:/run/kim-character/CONSTITUTION.md:ro
+      - ${KIM_SOURCE_DIR}/character/soul/PERSONA.md:/run/kim-character/PERSONA.md:ro
+      - ${KIM_SOURCE_DIR}/character/soul/SCENARIO.md:/run/kim-character/SCENARIO.md:ro
+      - ${KIM_SOURCE_DIR}/character/soul/WORLD.md:/run/kim-character/WORLD.md:ro
+      - ${KIM_HF_CACHE}:/home/kim/.cache/huggingface/hub:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      QWEN_TTS_URL: http://host.docker.internal:8093
+      KIM_OTA_DIR: /run/kim-ota
+      MIMIR_URL: http://memory:8080
+      HF_HUB_OFFLINE: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "4"
+    ports:
+      - "127.0.0.1:18869:18869"
+    networks: [services, kim_private]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',18869),3); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    secrets:
+      - kim_mimir_token
+secrets:
+  kim_mimir_token:
+    file: ${KIM_MIMIR_TOKEN_FILE:-${KIM_MIMIR_TOKEN_FILE}}
+networks:
+  services: {}

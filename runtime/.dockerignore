@@ -1,0 +1,11 @@
+tests/
+IMPLEMENTATION_PLAN.md
+README.md
+memory_service/
+__pycache__/
+*.pyc
+*.pem
+*.key
+*.env
+venv/
+nltk_data*/

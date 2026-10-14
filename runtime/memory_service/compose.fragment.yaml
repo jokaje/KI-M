@@ -1,0 +1,30 @@
+# Merge under the KI-M runtime Compose services/volumes/secrets; no host ports.
+services:
+  memory:
+    build:
+      context: ./memory_service
+    image: kim-mimir-memory:c812bae
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,noexec,nosuid,nodev
+    user: "11081:11081"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    volumes:
+      - kim_mimir_data:/data
+    secrets:
+      - kim_mimir_token
+    expose: ["8080"]
+    networks: [kim_private]
+    # Dockerfile HEALTHCHECK checks authenticated readiness.
+volumes:
+  kim_mimir_data:
+secrets:
+  kim_mimir_token:
+    file: ${KIM_MIMIR_TOKEN_FILE:-${KIM_MIMIR_TOKEN_FILE}}
+networks:
+  kim_private:
+    internal: true

@@ -1,0 +1,3 @@
+services:
+  voice:
+    image: kim-voice:pixel-candidate

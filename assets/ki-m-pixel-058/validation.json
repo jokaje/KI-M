@@ -1,0 +1,64 @@
+{
+  "version": "0.5.8-pixel-v2",
+  "grid_width": 64,
+  "grid_height": 64,
+  "format": "RGB565_LE",
+  "transparent_key": 0,
+  "total_frames": 46,
+  "banks": {
+    "idle": {
+      "frames": 8,
+      "frame_offset": 0,
+      "byte_offset": 0,
+      "byte_length": 65536
+    },
+    "happy": {
+      "frames": 8,
+      "frame_offset": 8,
+      "byte_offset": 65536,
+      "byte_length": 65536
+    },
+    "listening": {
+      "frames": 8,
+      "frame_offset": 16,
+      "byte_offset": 131072,
+      "byte_length": 65536
+    },
+    "thinking": {
+      "frames": 8,
+      "frame_offset": 24,
+      "byte_offset": 196608,
+      "byte_length": 65536
+    },
+    "speaking": {
+      "frames": 4,
+      "frame_offset": 32,
+      "byte_offset": 262144,
+      "byte_length": 32768
+    },
+    "blink": {
+      "frames": 4,
+      "frame_offset": 36,
+      "byte_offset": 294912,
+      "byte_length": 32768
+    },
+    "sleep": {
+      "frames": 4,
+      "frame_offset": 40,
+      "byte_offset": 327680,
+      "byte_length": 32768
+    },
+    "neutral": {
+      "frames": 1,
+      "frame_offset": 44,
+      "byte_offset": 360448,
+      "byte_length": 8192
+    },
+    "offline": {
+      "frames": 1,
+      "frame_offset": 45,
+      "byte_offset": 368640,
+      "byte_length": 8192
+    }
+  }
+}

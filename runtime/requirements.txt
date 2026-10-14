@@ -1,0 +1,4 @@
+pipecat-ai==0.0.105
+faster-whisper==1.2.1
+httpx==0.28.1
+numpy==2.2.6

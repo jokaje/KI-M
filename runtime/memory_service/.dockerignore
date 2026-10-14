@@ -1,0 +1,12 @@
+**/.git
+**/__pycache__
+**/*.pyc
+upstream/mimirs-memory-hub/playground
+upstream/mimirs-memory-hub/tests
+upstream/mimirs-memory-hub/benchmarks
+upstream/mimirs-memory-hub/examples
+upstream/mimirs-memory-hub/.venv
+tests
+*.log
+*.db
+*.jsonl
