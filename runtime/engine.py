@@ -68,11 +68,38 @@ class Metrics:
         return marks
 
 
+def pcm_summary(pcm):
+    """Bounded numerical signal health only; no audio or transcript retention."""
+    samples = np.frombuffer(pcm, dtype='<i2').astype(np.float64)
+    return {'samples': int(samples.size),
+            'rms': int(np.sqrt(np.mean(samples * samples))) if samples.size else 0,
+            'peak': int(np.max(np.abs(samples))) if samples.size else 0,
+            'nonzero': int(np.count_nonzero(samples)),
+            'clipped': int(np.count_nonzero(np.abs(samples) >= 32767))}
+
+
 class FailClosedProcessor(FrameProcessor):
     """Pipecat converts processor exceptions to nonfatal ErrorFrames by default."""
     failure_callback = None
 
+    def log_failure(self, exception):
+        # Record only static identifiers/codes, never error_msg, locals or text.
+        reason = ('no_speech' if isinstance(exception, ValueError)
+                  and str(exception) == 'no speech recognized' else 'processor_failure')
+        origin, line = 'unknown', 0
+        trace = exception.__traceback__ if exception else None
+        while trace is not None:
+            origin = Path(trace.tb_frame.f_code.co_filename).name
+            line = trace.tb_lineno
+            trace = trace.tb_next
+        LOG.warning('processor=%s error_type=%s origin=%s:%d reason=%s',
+                    type(self).__name__, type(exception).__name__ if exception else 'PipelineError',
+                    origin, line, reason)
+        if hasattr(self, '_input_summary'):
+            LOG.warning('voice_input=%s', self._input_summary)
+
     async def push_error(self, error_msg, exception=None, fatal=False):
+        self.log_failure(exception)
         if self.failure_callback:
             self.failure_callback(type(exception).__name__ if exception else 'PipelineError')
         # Never send exception messages (transcripts, URLs, credentials) to logs.
@@ -91,6 +118,7 @@ class SpeechToText(FailClosedProcessor):
         if isinstance(frame, InputAudioRawFrame):
             if frame.sample_rate != 16000 or frame.num_channels != 1:
                 raise ValueError('audio format')
+            self._input_summary = pcm_summary(frame.audio)
             def transcribe():
                 # The lock belongs to the model, not a stream. Cancellation does not
                 # stop native Whisper, so the abandoned invocation retains the lock.
@@ -331,6 +359,7 @@ class GermanVoice(FailClosedProcessor):
                         await self._synthesize(item)
                     except Exception as exc:
                         self.failure = exc
+                        self.log_failure(exc)
                         if self.failure_callback:
                             self.failure_callback(type(exc).__name__)
             finally:
@@ -431,7 +460,9 @@ class Engine:
                 if not failure.done():
                     failure.set_result(kind)
                 llm.completed.set()
+            input_summary = pcm_summary(pcm)
             for processor in processors:
+                processor._input_summary = input_summary
                 processor.failure_callback = fail
             async def feed():
                 await task.queue_frame(InputAudioRawFrame(pcm, 16000, 1))

@@ -18,6 +18,8 @@
 #include "kim_ota.h"
 #include "kim_runtime.h"
 #include "kim_ble.h"
+#include "kim_character_state.h"
+kim_character_poll_t kim_character_poll;
 #if __has_include("config_local.h")
 #include "config_local.h"
 #else
@@ -39,19 +41,20 @@ static lv_image_dsc_t descriptor;
 #include "box_3_microphone.h"
 static const char *const names[] = {"Neutral", "Idle", "Blink", "Listening", "Thinking", "Speaking", "Happy", "Offline", "Sleep"};
 
-/* BSP display_start wires a real GT911/TT21100 touch indev to LVGL. This
- * transparent top-level target covers every screen coordinate, including
- * outside the sprite. Never do codec or network work on the LVGL task. */
+/* Screen events are interaction/wake hints only. The physical BOOT button
+ * is the sole recording input; touch must never start, submit or cancel PTT.
+ * Keep this LVGL target for the settings menu and its wake/release gates. */
 static void touch_event(lv_event_t *event) {
     lv_event_code_t code = lv_event_get_code(event);
-    if (code == LV_EVENT_PRESSED && kim_menu_recording_allowed()) kim_touch_press(&kim_touch_ptt);
-    else if (code == LV_EVENT_RELEASED) kim_touch_release(&kim_touch_ptt);
-    else if (code == LV_EVENT_PRESS_LOST) kim_touch_lost(&kim_touch_ptt);
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED ||
+        code == LV_EVENT_PRESS_LOST) {
+        kim_character_interact(&kim_character_poll);
+    }
 }
 
 
 void app_main(void) {
-    ESP_LOGI(TAG, "KI-M pixel-avatar candidate; touch/BOOT PTT; Wi-Fi/settings/OTA/BLE");
+    ESP_LOGI(TAG, "KI-M pixel-avatar candidate; BOOT-only PTT; Wi-Fi/settings/OTA/BLE");
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(kim_settings_init());
     if ((size_t)(sprites_end - sprites_start) != KIM_SPRITE_TOTAL_FRAMES * KIM_SPRITE_FRAME_BYTES ||
@@ -87,7 +90,7 @@ void app_main(void) {
     lv_obj_set_style_text_color(status, lv_color_hex(0xffffff), 0);
     lv_obj_align(status, LV_ALIGN_BOTTOM_MID, 0, -22);
     lv_obj_t *hint = lv_label_create(screen);
-    lv_label_set_text(hint, "Hold screen or BOOT | Mute respected");
+    lv_label_set_text(hint, "Hold BOOT to talk | Touch: menu");
     lv_obj_set_style_text_color(hint, lv_color_hex(0xbec9d8), 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -3);
     lv_obj_t *touch = lv_obj_create(screen);
@@ -122,6 +125,8 @@ void app_main(void) {
     int last_mute = -1;
     uint32_t label_at = 0, bank_started = 0, next_blink = 2800;
     int previous_bank = -1;
+    bool last_boot_low = false;
+    bool last_menu_allowed = true;
     unsigned shown_frame = 45;
     while (1) {
         kim_voice_poll_mute();
@@ -131,10 +136,20 @@ void app_main(void) {
             last_mute = mute;
         }
         if (bsp_display_lock(1000)) {
+            bool boot_low = gpio_get_level(GPIO_NUM_0) == 0;
+            if (boot_low != last_boot_low) {
+                kim_character_interact(&kim_character_poll);
+                last_boot_low = boot_low;
+            }
             kim_menu_tick(kim_runtime_voice_busy());
-            kim_boot_sample(&kim_touch_ptt, gpio_get_level(GPIO_NUM_0) == 0,
+            kim_boot_sample(&kim_touch_ptt, boot_low,
                             (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
-            if (!kim_menu_recording_allowed()) kim_ptt_cancel(&kim_touch_ptt);
+            bool menu_allowed = kim_menu_recording_allowed();
+            if (menu_allowed != last_menu_allowed) {
+                kim_character_interact(&kim_character_poll);
+                last_menu_allowed = menu_allowed;
+            }
+            if (!menu_allowed) kim_ptt_cancel(&kim_touch_ptt);
 
             /* Device state always outranks reply emotion. Render at bounded
              * frame changes only; LVGL owns this buffer under its writer lock. */
@@ -142,6 +157,21 @@ void app_main(void) {
             if (state == KIM_IDLE && !atomic_load(&kim_backend_healthy)) state = KIM_OFFLINE;
             if (state < KIM_NEUTRAL || state > KIM_SLEEP) state = KIM_IDLE;
             uint32_t now_ms = lv_tick_get();
+            kim_character_gate_t character_gate = {
+                .online = atomic_load(&kim_is_online),
+                .healthy = atomic_load(&kim_backend_healthy),
+                .idle = state == KIM_IDLE && !kim_runtime_voice_busy(),
+                .released = !atomic_load(&kim_touch_ptt.held) && !boot_low,
+                .menu_allowed = menu_allowed,
+                .unmuted = mute != 0,
+            };
+            (void)kim_character_consume(&kim_character_poll,
+                (uint32_t)(esp_timer_get_time() / 1000), &character_gate);
+            kim_character_state_t hint = kim_character_visible(&kim_character_poll,
+                (uint32_t)(esp_timer_get_time() / 1000), &character_gate);
+            if (hint == KIM_CHARACTER_SLEEP) kim_menu_remote_sleep();
+            else if (state == KIM_IDLE && hint == KIM_CHARACTER_THINKING) state = KIM_THINKING;
+            else if (state == KIM_IDLE && hint == KIM_CHARACTER_HAPPY) state = KIM_HAPPY;
             uint32_t sleep_elapsed = 0;
             int sleep_phase = kim_menu_sleep_phase(&sleep_elapsed);
             int visual_state = sleep_phase ? KIM_SLEEP : state;

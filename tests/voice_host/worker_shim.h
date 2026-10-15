@@ -42,6 +42,7 @@ static inline int xSemaphoreTake(SemaphoreHandle_t s, int ticks) { if(!s->binary
 static inline int xSemaphoreGive(SemaphoreHandle_t s) { if(s->binary)atomic_store(&s->signaled,true);else pthread_mutex_unlock(&s->mutex);return pdTRUE; }
 static inline void vSemaphoreDelete(SemaphoreHandle_t s){pthread_mutex_destroy(&s->mutex);free(s);}
 static inline int xTaskCreate(void (*fn)(void*),const char *name,int stack,void *arg,int priority,TaskHandle_t *task) { (void)name;(void)stack;(void)priority; if(mock_create_fail)return 0; extern void *worker_entry(void*); (void)fn; return pthread_create(task,NULL,worker_entry,arg)==0 ? pdPASS:0; }
+static inline int xTaskCreatePinnedToCore(void (*fn)(void*),const char *name,int stack,void *arg,int priority,TaskHandle_t *task,int core) { return xTaskCreate(fn,name,stack,arg,priority,task); }
 static inline void vTaskDelete(void *arg) { (void)arg; pthread_exit(NULL); }
 static inline void esp_restart(void) { atomic_fetch_add(&mock_restarts,1); if(mock_reset_exit) { assert(atomic_load(&mock_closed)==0); _exit(42); } abort(); }
 static void *esp_crt_bundle_attach;

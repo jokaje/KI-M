@@ -35,6 +35,9 @@
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "kim_runtime.h"
+#include "kim_character_state.h"
+#include "kim_device_state.h"
+#include "kim_menu.h"
 #include "kim_settings.h"
 #include "kim_wifi.h"
 #include "esp_netif_sntp.h"
@@ -255,7 +258,9 @@ static bool stream_player_start(stream_player_t *p) {
     kim_jitter_reset(&p->fifo);
     p->lock = xSemaphoreCreateMutex();
     if (!p->lock) return false;
-    if (xTaskCreate(stream_playback_task, "kim-playback", 4096, p, 5, &p->task) != pdPASS) {
+    /* Audio owns core 1: Wi-Fi/LWIP and the IDLE0 watchdog stay unperturbed on
+     * core 0 even while the codec write blocks. */
+    if (xTaskCreatePinnedToCore(stream_playback_task, "kim-playback", 4096, p, 5, &p->task, 1) != pdPASS) {
         vSemaphoreDelete(p->lock);
         p->lock = NULL;
         return false;
@@ -390,7 +395,7 @@ static stream_result_t send_stream(size_t len) {
     do {
         if (cancelled() || !kim_is_online || esp_timer_get_time() > deadline) goto close_stream;
         response = esp_http_client_fetch_headers(client);
-    } while (response == -ESP_ERR_HTTP_EAGAIN);
+    } while (response == -ESP_ERR_HTTP_EAGAIN && (vTaskDelay(pdMS_TO_TICKS(2)), true));
     if (response < 0) goto close_stream;
     int status = esp_http_client_get_status_code(client);
     ESP_LOGI(TAG, "stream headers response=%lld status=%d type=%d length=%d encoding=%d",
@@ -407,7 +412,7 @@ static stream_result_t send_stream(size_t len) {
     stream_player = player;
     while (!cancelled() && kim_is_online && esp_timer_get_time() <= deadline) {
         int n = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
-        if (n == -ESP_ERR_HTTP_EAGAIN) continue;
+        if (n == -ESP_ERR_HTTP_EAGAIN) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
         if (n < 0) { ESP_LOGW(TAG, "stream read err=%d", n); break; }
         if (!n) {
             if (kim_pcm_finish(&parser) && audio.opened && audio.nonzero &&
@@ -442,6 +447,160 @@ close_stream:
 }
 
 #ifndef KIM_VOICE_WORKER_TEST
+extern kim_character_poll_t kim_character_poll;
+static esp_err_t character_header(esp_http_client_event_t *event) {
+    if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key &&
+        !strcasecmp(event->header_key, "Content-Type") && event->user_data)
+        *(bool *)event->user_data = event->header_value &&
+            !strcasecmp(event->header_value, "application/json");
+    return ESP_OK;
+}
+static kim_character_gate_t character_gate(void) {
+    return (kim_character_gate_t){
+        .online = atomic_load(&kim_is_online),
+        .healthy = atomic_load(&kim_backend_healthy),
+        .idle = !kim_runtime_voice_busy() && kim_voice_display_state() == KIM_IDLE,
+        .released = !atomic_load(&kim_touch_ptt.held),
+        .menu_allowed = kim_menu_recording_allowed(),
+        .unmuted = gpio_get_level(BSP_BUTTON_MUTE_IO) != 0,
+    };
+}
+/* The metadata task alone owns this snapshot and its small TLS request. Physical
+ * GPIO1 is input-only; menu_open reads the UI writer's atomic gate snapshot. */
+static kim_device_state_t device_state;
+static void device_state_sample(void) {
+    kim_device_state_sample(&device_state, (uint32_t)(esp_timer_get_time() / 1000),
+                            gpio_get_level(BSP_BUTTON_MUTE_IO) == 0, kim_menu_open());
+}
+static void device_state_report(void) {
+    device_state_sample();
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!kim_device_state_due(&device_state, now) || !atomic_load(&kim_is_online)) return;
+    /* A busy voice turn may defer this request; it must never block PTT. */
+    if (!kim_tls_probe_begin()) return;
+    uint32_t epoch = kim_device_state_epoch(&device_state);
+    const char suffix[] = "/v1/turn";
+    size_t length = strlen(KIM_SERVER_URL);
+    char url[256], auth[256], body[KIM_DEVICE_STATE_JSON_CAP];
+    bool success = false;
+    if (length < sizeof(suffix) - 1 ||
+        strcmp(KIM_SERVER_URL + length - sizeof(suffix) + 1, suffix)) goto done_state;
+    int url_len = snprintf(url, sizeof(url), "%.*s/v1/device-state",
+                           (int)(length - sizeof(suffix) + 1), KIM_SERVER_URL);
+    int auth_len = snprintf(auth, sizeof(auth), "Bearer %s", KIM_DEVICE_TOKEN);
+    if (url_len < 0 || (size_t)url_len >= sizeof(url) ||
+        auth_len < 0 || (size_t)auth_len >= sizeof(auth) ||
+        !kim_device_state_format(&device_state, epoch, body, sizeof(body))) goto done_state;
+    esp_http_client_config_t cfg = {.url = url,
+        .cert_pem = KIM_SERVER_CA_PEM[0] ? KIM_SERVER_CA_PEM : NULL,
+        .crt_bundle_attach = KIM_SERVER_CA_PEM[0] ? NULL : esp_crt_bundle_attach,
+        .timeout_ms = 300, .buffer_size = 256, .disable_auto_redirect = true};
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) goto done_state;
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    if (esp_http_client_set_header(client, "Authorization", auth) == ESP_OK &&
+        esp_http_client_set_header(client, "Content-Type", "application/json") == ESP_OK &&
+        esp_http_client_set_post_field(client, body, strlen(body)) == ESP_OK &&
+        esp_http_client_perform(client) == ESP_OK &&
+        esp_http_client_get_status_code(client) == 204)
+        success = true;
+    esp_http_client_cleanup(client);
+done_state:
+    /* A changed physical gate wins over an old successful in-flight report. */
+    device_state_sample();
+    now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (success) kim_device_state_sent(&device_state, now, epoch);
+    else kim_device_state_failed(&device_state, now);
+    kim_tls_probe_end();
+}
+/* A separate endpoint, but the same origin, bearer, and verified CA policy
+ * as /v1/health. Never parse a partial, redirected or oversized response. */
+static void character_probe(void) {
+    kim_character_gate_t gate = character_gate();
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!kim_character_due(&kim_character_poll, now, &gate) ||
+        !kim_tls_probe_begin()) return;
+    kim_character_poll_started(&kim_character_poll, now);
+    unsigned generation = atomic_load(&kim_character_poll.generation);
+    uint32_t privacy_epoch = kim_device_state_epoch(&device_state);
+    const char suffix[] = "/v1/turn";
+    size_t length = strlen(KIM_SERVER_URL);
+    if (length < sizeof(suffix) - 1 ||
+        strcmp(KIM_SERVER_URL + length - sizeof(suffix) + 1, suffix)) goto done;
+    char url[256], auth[256], body[193];
+    int n = snprintf(url, sizeof(url), "%.*s/v1/state", (int)(length - sizeof(suffix) + 1), KIM_SERVER_URL);
+    if (n < 0 || n >= sizeof(url) ||
+        snprintf(auth, sizeof(auth), "Bearer %s", KIM_DEVICE_TOKEN) >= sizeof(auth)) goto done;
+    bool json_type = false;
+    esp_http_client_config_t cfg = {.url = url,
+        .cert_pem = KIM_SERVER_CA_PEM[0] ? KIM_SERVER_CA_PEM : NULL,
+        .crt_bundle_attach = KIM_SERVER_CA_PEM[0] ? NULL : esp_crt_bundle_attach,
+        .timeout_ms = 150, .buffer_size = 256,
+        .event_handler = character_header, .user_data = &json_type};
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) goto done;
+    device_state_sample();
+    gate = character_gate();
+    if (kim_device_state_epoch(&device_state) != privacy_epoch ||
+        atomic_load(&kim_character_poll.generation) != generation ||
+        !kim_character_eligible(&gate) ||
+        (uint32_t)((esp_timer_get_time() / 1000) - now) >= 900) goto close_state;
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    if (esp_http_client_set_header(client, "Authorization", auth) != ESP_OK ||
+        esp_http_client_set_header(client, "Accept", "application/json") != ESP_OK ||
+        esp_http_client_open(client, 0) != ESP_OK) goto close_state;
+    device_state_sample();
+    gate = character_gate();
+    if (kim_device_state_epoch(&device_state) != privacy_epoch ||
+        atomic_load(&kim_character_poll.generation) != generation ||
+        !kim_character_eligible(&gate) ||
+        (uint32_t)((esp_timer_get_time() / 1000) - now) >= 900) goto close_state;
+    int64_t declared = esp_http_client_fetch_headers(client);
+    device_state_sample();
+    if ((uint32_t)((esp_timer_get_time() / 1000) - now) >= 900 ||
+        kim_device_state_epoch(&device_state) != privacy_epoch ||
+        atomic_load(&kim_character_poll.generation) != generation ||
+        declared < 1 || declared > 192 || !json_type ||
+        esp_http_client_get_status_code(client) != 200 ||
+        esp_http_client_is_chunked_response(client)) goto close_state;
+    int received = 0;
+    while (received < declared &&
+           (uint32_t)((esp_timer_get_time() / 1000) - now) < 900 &&
+           atomic_load(&kim_character_poll.generation) == generation &&
+           kim_device_state_epoch(&device_state) == privacy_epoch &&
+           !atomic_load(&kim_touch_ptt.held)) {
+        int got = esp_http_client_read(client, body + received, (int)declared - received);
+        if (got <= 0) break;
+        received += got;
+    }
+    kim_character_state_t suggested;
+    device_state_sample();
+    gate = character_gate();
+    if ((uint32_t)((esp_timer_get_time() / 1000) - now) < 900 &&
+        kim_device_state_epoch(&device_state) == privacy_epoch &&
+        atomic_load(&kim_character_poll.generation) == generation &&
+        received == declared && esp_http_client_is_complete_data_received(client) &&
+        kim_character_parse(body, (size_t)received, &suggested) &&
+        kim_character_eligible(&gate))
+        kim_character_offer(&kim_character_poll, generation, suggested);
+close_state:
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+done:
+    kim_tls_probe_end();
+}
+/* Only this low-priority task may issue metadata I/O. It never holds the LVGL
+ * writer lock or the voice/maintenance lock, and a press invalidates the epoch
+ * even when a TLS call is in progress. The UI is the sole suggestion writer. */
+static void character_task(void *arg) {
+    (void)arg;
+    for (;;) {
+        device_state_report();
+        if (!kim_device_state_due(&device_state, (uint32_t)(esp_timer_get_time() / 1000)))
+            character_probe();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 static bool health_probe(void) {
     const char suffix[] = "/v1/turn";
     size_t length = strlen(KIM_SERVER_URL);
@@ -497,7 +656,7 @@ static void send_turn(size_t len) {
     do {
         if (cancelled() || !kim_is_online || esp_timer_get_time() > deadline) goto close;
         headers = esp_http_client_fetch_headers(client);
-    } while (headers == -ESP_ERR_HTTP_EAGAIN);
+    } while (headers == -ESP_ERR_HTTP_EAGAIN && (vTaskDelay(pdMS_TO_TICKS(2)), true));
     if (headers < 0 || esp_http_client_get_status_code(client) != 200) goto close;
     int expected = esp_http_client_get_content_length(client);
     if (expected < 44 || expected > MAX_REPLY || esp_http_client_is_chunked_response(client)) goto close;
@@ -549,6 +708,9 @@ void kim_voice_task(void *arg) {
     }
     ESP_LOGI(TAG, "audio startup complete; PTT enabled");
     atomic_store(&kim_audio_ready, true);
+    if (provisioned && xTaskCreatePinnedToCore(character_task, "kim-state", 6144,
+                                               NULL, 1, NULL, 1) != pdPASS)
+        ESP_LOGW(TAG, "metadata poll unavailable");
     esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     bool sntp_started = esp_netif_sntp_init(&sntp) == ESP_OK;
     bool time_synced = false;

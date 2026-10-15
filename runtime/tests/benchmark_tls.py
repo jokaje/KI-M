@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import socket
 import ssl
 import struct
@@ -15,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-PRIVATE = Path('/home/coldnet/.local/share/kim-hotspot-session')
+PRIVATE = Path(os.environ.get('KIM_PRIVATE_DIR', Path.home() / '.local/share/ki-m'))
+SERVER_NAME = os.environ.get('KIM_TLS_SERVER_NAME', 'ki-m.local')
 
 
 def synthetic_pcm():
@@ -54,10 +56,10 @@ def turn(pcm, fallback=False):
     context = ssl.create_default_context(cafile=str(PRIVATE / 'server.crt'))
     begin = time.monotonic()
     with socket.create_connection(('127.0.0.1', 18869), timeout=10) as raw:
-        with context.wrap_socket(raw, server_hostname='10.94.158.231') as sock:
+        with context.wrap_socket(raw, server_hostname=SERVER_NAME) as sock:
             sock.settimeout(155)
             route = '/v1/turn' if fallback else '/v1/turn-stream'
-            headers = (f'POST {route} HTTP/1.1\r\nHost: 10.94.158.231\r\n'
+            headers = (f'POST {route} HTTP/1.1\r\nHost: {SERVER_NAME}\r\n'
                        f'Authorization: Bearer {token}\r\n'
                        'Content-Type: application/vnd.kim.pcm;rate=16000;channels=1;format=s16le\r\n'
                        f'Content-Length: {len(pcm)}\r\n\r\n').encode('ascii')

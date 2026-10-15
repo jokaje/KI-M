@@ -13,6 +13,8 @@ bool kim_menu_open(void);
 /* Call under the BSP display lock at ~10 ms cadence, from the input owner. */
 #ifndef KIM_MENU_GATE_TEST
 void kim_menu_tick(bool voice_busy);
+/* Only under LVGL writer; remote state is a visual hint, not a power command. */
+void kim_menu_remote_sleep(void);
 #endif
 bool kim_menu_recording_allowed(void);
 #ifndef KIM_MENU_GATE_TEST

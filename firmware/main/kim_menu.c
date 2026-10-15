@@ -3,6 +3,10 @@
 #include "kim_menu.h"
 #include <stdint.h>
 #include <string.h>
+#include <stdatomic.h>
+/* The LVGL writer owns mutable UI fields; cross-core readers see one gate. */
+static atomic_uint gate_snapshot;
+static void publish_gate(void);
 
 static bool menu_open, asleep, release_gate;
 static uint32_t last_activity;
@@ -12,22 +16,26 @@ static int emotion;
 static bool waking;
 static bool dimmed;
 #endif
-static void gate_open(bool open) { menu_open = open; release_gate = true; }
-static void gate_sleep(bool sleep) { asleep = sleep; release_gate = true; }
+static void publish_gate(void) {
+    atomic_store(&gate_snapshot, (menu_open ? 1U : 0U) | (asleep ? 2U : 0U) |
+                                 (release_gate ? 4U : 0U));
+}
+static void gate_open(bool open) { menu_open = open; release_gate = true; publish_gate(); }
+static void gate_sleep(bool sleep) { asleep = sleep; release_gate = true; publish_gate(); }
 static void gate_step(uint32_t now, bool touch, bool boot) {
     (void)now;
-    if (!touch && !boot && !menu_open && !asleep) release_gate = false;
+    if (!touch && !boot && !menu_open && !asleep) { release_gate = false; publish_gate(); }
 }
 static bool sleep_due(uint32_t now, uint32_t last, int seconds, bool voice_busy,
                       bool touch, bool boot) {
     return seconds > 0 && !menu_open && !asleep && !voice_busy && !touch && !boot &&
            (uint32_t)(now - last) >= (uint32_t)seconds * 1000U;
 }
-bool kim_menu_open(void) { return menu_open; }
-bool kim_menu_recording_allowed(void) { return !menu_open && !asleep && !release_gate; }
+bool kim_menu_open(void) { return (atomic_load(&gate_snapshot) & 1U) != 0; }
+bool kim_menu_recording_allowed(void) { return atomic_load(&gate_snapshot) == 0; }
 
 #ifdef KIM_MENU_GATE_TEST
-void kim_menu_gate_test_reset(void) { menu_open = asleep = release_gate = false; last_activity = 0; }
+void kim_menu_gate_test_reset(void) { menu_open = asleep = release_gate = false; last_activity = 0; publish_gate(); }
 void kim_menu_gate_test_open(bool open) { gate_open(open); }
 void kim_menu_gate_test_sleep(bool sleep) { gate_sleep(sleep); }
 void kim_menu_gate_test_step(uint32_t now, bool touch, bool boot) { gate_step(now, touch, boot); }
@@ -39,6 +47,10 @@ bool kim_menu_gate_test_sleep_due(uint32_t now, uint32_t last, int seconds, bool
 #include <stdio.h>
 #include "voice.h"
 #include "kim_runtime.h"
+#ifndef KIM_MENU_HOST_TEST
+#include "kim_character_state.h"
+extern kim_character_poll_t kim_character_poll;
+#endif
 #ifndef KIM_MENU_HOST_TEST
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
@@ -212,6 +224,9 @@ static void menu_cb(lv_event_t *e) {
     activity();
     if (menu_open) close_menu();
     else {
+#ifndef KIM_MENU_HOST_TEST
+        kim_character_interact(&kim_character_poll);
+#endif
         /* The callback runs under LVGL's writer context. Invalidate even a
          * released turn before opening the overlay; the next main tick can
          * be too late to prevent a voice submit. */
@@ -419,15 +434,29 @@ static void wake_cb(lv_event_t *e) {
     (void)e;
     if (!asleep) return;
     if (!waking && bsp_display_brightness_set(current_brightness) == ESP_OK) {
+#ifndef KIM_MENU_HOST_TEST
+        kim_character_interact(&kim_character_poll);
+#endif
         waking = true;
         dimmed = false;
         wake_started = lv_tick_get();
         activity();
     }
 }
+void kim_menu_remote_sleep(void) {
+    /* UI writer only. The usual cover and BOOT/touch wake path stays live. */
+    if (menu_open || asleep || release_gate || kim_runtime_voice_busy() ||
+        gpio_get_level(GPIO_NUM_0) == 0 || atomic_load(&kim_touch_ptt.held)) return;
+    gate_sleep(true);
+    dimmed = false;
+    sleep_started = lv_tick_get();
+    lv_obj_remove_flag(wake_cover, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(wake_cover);
+}
 void kim_menu_init(lv_obj_t *screen, lv_obj_t *ptt_target) {
     (void)ptt_target; /* Created after PTT target: foreground UI intercepts input. */
     menu_open = asleep = release_gate = waking = dimmed = false;
+    publish_gate();
     current_brightness = kim_settings_brightness();
     sleep_seconds = kim_settings_sleep_s();
     activity();

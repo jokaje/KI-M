@@ -3,16 +3,18 @@
 Work-in-progress firmware and local voice backend for an ESP32-S3-BOX-3 companion with a pixel avatar, German speech, Qwen TTS, Ollama responses and consent-based memory.
 
 ## Included
-- `firmware/`: ESP-IDF firmware, pixel assets, Wi-Fi settings, touch/BOOT push-to-talk, hardware mute, OTA and BLE modules.
+- `firmware/`: ESP-IDF firmware, pixel assets, Wi-Fi settings, physical BOOT-button-only push-to-talk, hardware mute, OTA and BLE modules. Touchscreen menus remain enabled; touching the main screen does not record.
 - `runtime/`: Pipecat voice pipeline, authenticated TLS transport, sentence audio streaming and emotion metadata.
 - `runtime/memory_service/`: isolated memory adapter and required upstream Mimir Python source.
 - `tests/`, `tools/`, `assets/`: host regression tests, asset generation tools and pixel source art.
 - `THIRD-PARTY/`: upstream license notices. Additional dependencies retain their own licenses.
 
 ## Status
-Source snapshot associated with the 0.5.8 pixel firmware candidate. This is not a new production release or a fresh readback of the device. Reported animation stutter, thinking hangs and WLAN/menu usability remain under investigation; source presence is not hardware acceptance.
+Source update for firmware **0.5.9** and the matching voice-server diagnostics. The private provisioned app was built with ESP-IDF 6.0.1, installed on a BOX-3 and freshly read back with an exact byte match. Wi-Fi/settings NVS was unchanged by the app-only update. Boot reported 0.5.9, BOOT-only PTT, audio readiness and authenticated backend health. No provisioned binary, credentials or device backup is published here.
 
-Six selected tests passed against an isolated export: response emotion parser tests and the production C pixel compositor / stream-metadata parser tests. This does not establish full test-suite, ESP-IDF build or physical acceptance.
+The previous firmware's real speech path has been heard working. After the 0.5.9 update, physical confirmation that screen touches do not record and BOOT speech still works remains pending. Host tests do not establish this physical acceptance. OTA code exists, but initialization currently reports unavailable on the tested deployment; do not assume OTA is operational.
+
+Verification: private development firmware suite **76 passed, 5 skipped, 6 subtests passed**, with one pre-existing missing original video-asset test failure. Packaged voice-runtime suite **80 passed**. Actual synthetic German STT/model/TTS turns completed with nonzero audio and terminal `E`, including the public HTTPS route. These results describe the tested deployment/candidate; see [the update notes](docs/UPDATE-0.5.9.md) for the separate sanitized-export checks and remaining work.
 
 ## Architecture
 The ESP captures deliberate push-to-talk audio. The server runs multilingual Whisper STT, prepares the authored character context and bounded memory recall, streams responses from Ollama, and synthesizes German audio using an external Qwen TTS service. Audio is returned with the existing PCM frame protocol.

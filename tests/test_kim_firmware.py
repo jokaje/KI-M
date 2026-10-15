@@ -64,7 +64,11 @@ class FirmwareAssetsTest(unittest.TestCase):
         self.assertIn('kim_touch_submit(', voice)
         self.assertIn('kim_touch_recording(', voice)
         self.assertNotIn('gpio_get_level(BSP_BUTTON_CONFIG_IO)', voice)
-        self.assertIn('Hold screen or BOOT', main)
+        self.assertIn('Hold BOOT to talk', main)
+        self.assertNotIn('Hold screen or BOOT', main)
+        self.assertNotIn('kim_touch_press(', main)
+        self.assertNotIn('kim_touch_release(', main)
+        self.assertNotIn('kim_touch_lost(', main)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@
 import http.client
 import io
 import json
+import os
 import socket
 import ssl
 import struct
@@ -11,7 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
-PRIVATE = Path('/home/coldnet/.local/share/kim-hotspot-session')
+PRIVATE = Path(os.environ.get('KIM_PRIVATE_DIR', Path.home() / '.local/share/ki-m'))
+SERVER_NAME = os.environ.get('KIM_TLS_SERVER_NAME', 'ki-m.local')
 START = time.monotonic()
 
 
@@ -46,9 +48,9 @@ def main():
     token = (PRIVATE / 'token').read_text().strip()
     ctx = ssl.create_default_context(cafile=str(PRIVATE / 'server.crt'))
     with socket.create_connection(('127.0.0.1', 18869), timeout=150) as raw:
-        with ctx.wrap_socket(raw, server_hostname='10.94.158.231') as sock:
+        with ctx.wrap_socket(raw, server_hostname=SERVER_NAME) as sock:
             sock.settimeout(150)
-            request = (b'POST /v1/turn-stream HTTP/1.1\r\nHost: 10.94.158.231\r\n'
+            request = (f'POST /v1/turn-stream HTTP/1.1\r\nHost: {SERVER_NAME}\r\n'.encode('ascii')
                        + b'Authorization: Bearer ' + token.encode() + b'\r\n'
                        + b'Content-Type: application/vnd.kim.pcm;rate=16000;channels=1;format=s16le\r\n'
                        + b'Content-Length: ' + str(len(pcm)).encode() + b'\r\n\r\n' + pcm)

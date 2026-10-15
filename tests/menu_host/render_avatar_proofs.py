@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Feed every converted clip to real LVGL host renderer; preserve PNG proofs."""
 import json
+import os
 import subprocess
 from io import BytesIO
 from pathlib import Path
@@ -9,11 +10,11 @@ ROOT=Path(__file__).resolve().parents[2]
 manifest=json.loads((ROOT/'firmware/main/generated/avatar.json').read_text())
 data=(ROOT/'firmware/main/generated/avatar.bin').read_bytes()
 assert len(data)==manifest['bytes']
-scratch=Path('/home/coldnet/.hermes/cache/scratch/kim-avatar-proofs')
+scratch=Path(os.environ.get('KIM_PROOF_SCRATCH', ROOT/'build/avatar-proofs'))
 scratch.mkdir(parents=True,exist_ok=True)
 proof=ROOT/'tests/menu_host/avatar-proofs'
 proof.mkdir(exist_ok=True)
-exe=Path('/home/coldnet/.hermes/cache/scratch/kim-menu-build/avatar_render_probe')
+exe=Path(os.environ.get('KIM_AVATAR_RENDER_PROBE', ROOT/'build/menu-host/avatar_render_probe'))
 images=[]
 for clip in manifest['clips']:
     name=clip['name']
